@@ -17,6 +17,7 @@
 #include "kernel/fs.h"
 #include "kernel/param.h"
 #include "kernel/sysinfo.h"
+#include "kernel/uproc.h"
 #include "user/user.h"
 
 #define ARGV(...) ((char *[]){__VA_ARGS__, 0})
@@ -689,6 +690,213 @@ testsysinfo(void)
      b.nproc == a.nproc && b.nopenfile == a.nopenfile);
 }
 
+// enum procstate values from kernel/proc.h
+#define PS_USED 1
+#define PS_SLEEPING 2
+#define PS_RUNNING 4
+#define PS_ZOMBIE 5
+#define STRESSKIDS 8
+#define STRESSCALLS 2000
+
+struct uproc pbuf[NPROC];
+int savedpid[NPROC];
+
+// The entry for pid in pbuf[0..n), or 0.
+struct uproc *
+findproc(int n, int pid)
+{
+  int i;
+
+  for (i = 0; i < n; i++) {
+    if (pbuf[i].pid == pid)
+      return &pbuf[i];
+  }
+  return 0;
+}
+
+// Poll getprocs until pid reaches state, for up to about 100 ticks.
+struct uproc *
+waitstate(int pid, int state)
+{
+  struct uproc *u;
+  int i;
+
+  for (i = 0; i < 100; i++) {
+    u = findproc(getprocs(pbuf, NPROC), pid);
+    if (u && u->state == state)
+      return u;
+    pause(1);
+  }
+  return 0;
+}
+
+void
+testgetprocs(void)
+{
+  struct sysinfo si;
+  struct uproc *u;
+  int n, i, j, me, pid, fds[2], bad, same;
+  uint64 before;
+  char c;
+
+  // Arguments.
+  ok("getprocs: max 0 -> 0", getprocs(pbuf, 0) == 0);
+  ok("getprocs: max -1 -> -1", getprocs(pbuf, -1) == -1);
+  ok("getprocs: buf above MAXVA -> -1",
+     getprocs((struct uproc *)BADPTR, NPROC) == -1);
+  ok("getprocs: buf 0 (read-only text) -> -1", getprocs(0, NPROC) == -1);
+  ok("getprocs: buf 0 with max 0 -> 0", getprocs(0, 0) == 0);
+
+  // max 1 is the first slot in the table: init.
+  n = getprocs(pbuf, 1);
+  ok("getprocs: max 1 returns init",
+     n == 1 && pbuf[0].pid == 1 && pbuf[0].ppid == 0 &&
+     pbuf[0].state == PS_SLEEPING && strcmp(pbuf[0].name, "init") == 0);
+
+  // The full count matches sysinfo, and a smaller max stops early in
+  // table order.
+  n = getprocs(pbuf, NPROC);
+  sysinfo(&si);
+  ok("getprocs: count equals sysinfo nproc", n == si.nproc);
+  for (i = 0; i < n; i++)
+    savedpid[i] = pbuf[i].pid;
+  same = getprocs(pbuf, n - 1) == n - 1;
+  for (i = 0; same && i < n - 1; i++)
+    same = pbuf[i].pid == savedpid[i];
+  ok("getprocs: max < count returns max, in table order", n >= 3 && same);
+
+  // Our own entry, and its parent (the shell).
+  me = getpid();
+  n = getprocs(pbuf, NPROC);
+  u = findproc(n, me);
+  ok("getprocs: own entry running, right sz and name",
+     u && u->state == PS_RUNNING && u->sz == (uint64)sbrk(0) &&
+     strcmp(u->name, "a1test") == 0);
+  ok("getprocs: own ppid is the shell",
+     u && u->ppid > 1 && findproc(n, u->ppid) &&
+     strcmp(findproc(n, u->ppid)->name, "sh") == 0);
+
+  // A child blocked on a pipe is sleeping; once it exits it is a
+  // zombie until waited for, then gone.
+  pipe(fds);
+  pid = fork();
+  if (pid == 0) {
+    close(fds[1]);
+    read(fds[0], &c, 1);
+    exit(0);
+  }
+  u = waitstate(pid, PS_SLEEPING);
+  ok("getprocs: blocked child is sleeping, ppid is us",
+     u && u->ppid == me && strcmp(u->name, "a1test") == 0);
+  close(fds[0]);
+  close(fds[1]);
+  ok("getprocs: exited child is a zombie", waitstate(pid, PS_ZOMBIE) != 0);
+  wait(0);
+  ok("getprocs: reaped child is gone", findproc(getprocs(pbuf, NPROC), pid) == 0);
+
+  // Stress: children fork and exit in a loop while we call getprocs.
+  sysinfo(&si);
+  before = si.nproc;
+  for (i = 0; i < STRESSKIDS; i++) {
+    if (fork() == 0) {
+      for (j = 0; j < 40; j++) {
+        pid = fork();
+        if (pid == 0)
+          exit(0);
+        if (pid > 0)
+          wait(0);
+      }
+      exit(0);
+    }
+  }
+  bad = 0;
+  for (i = 0; i < STRESSCALLS; i++) {
+    n = getprocs(pbuf, NPROC);
+    if (n < 1 || n > NPROC)
+      bad++;
+    for (j = 0; j < n && n <= NPROC; j++) {
+      if (pbuf[j].pid <= 0 || pbuf[j].state < PS_USED ||
+          pbuf[j].state > PS_ZOMBIE || pbuf[j].ppid < 0)
+        bad++;
+    }
+  }
+  for (i = 0; i < STRESSKIDS; i++)
+    wait(0);
+  ok("getprocs: stress entries all sane", bad == 0);
+  sysinfo(&si);
+  ok("getprocs: stress nproc back to start", si.nproc == before);
+}
+
+// Does line (up to '\n') have the form a\tb\tstate\t<digits>\tname?
+// a and b (pids) are not checked when -1; state and name when 0.
+int
+psline(char *line, int a, int b, char *state, char *name)
+{
+  char *f[5], *p;
+  int k;
+
+  // Split into 5 tab-separated fields, ending at '\n'.
+  k = 0;
+  f[k++] = line;
+  for (p = line; *p && *p != '\n'; p++) {
+    if (*p == '\t') {
+      if (k == 5)
+        return 0;
+      *p = '\0';
+      f[k++] = p + 1;
+    }
+  }
+  if (k != 5)
+    return 0;
+  *p = '\0';
+  if (*f[3] == '\0')
+    return 0;
+  for (p = f[3]; *p; p++) {
+    if (*p < '0' || *p > '9')
+      return 0;
+  }
+  return (a < 0 || atoi(f[0]) == a) && (b < 0 || atoi(f[1]) == b) &&
+         (state == 0 || strcmp(f[2], state) == 0) &&
+         (name == 0 || strcmp(f[4], name) == 0);
+}
+
+void
+testps(void)
+{
+  char *line, *next;
+  int status, header, init, self, lines, badlines, me;
+
+  me = getpid();
+  status = run(ARGV("ps"), "");
+  ok("ps: exits 0, no stderr", status == 0 && err[0] == '\0');
+
+  header = init = self = lines = badlines = 0;
+  for (line = out; *line; line = next) {
+    for (next = line; *next && *next != '\n'; next++)
+      ;
+    if (*next)
+      *next++ = '\0';
+    if (lines++ == 0) {
+      header = strcmp(line, "PID\tPPID\tSTATE\tSIZE\tNAME") == 0;
+      continue;
+    }
+    // psline() modifies the line, so test each pattern on a copy.
+    strcpy(wbuf, line);
+    if (psline(wbuf, 1, 0, "sleeping", "init"))
+      init = 1;
+    strcpy(wbuf, line);
+    if (psline(wbuf, -1, me, "running", "ps"))
+      self = 1;
+    strcpy(wbuf, line);
+    if (!psline(wbuf, -1, -1, 0, 0))
+      badlines++;
+  }
+  ok("ps: exact header", header);
+  ok("ps: init line 1\\t0\\tsleeping\\t<size>\\tinit", init);
+  ok("ps: own line is running, ppid is the caller", self);
+  ok("ps: every line has 5 tab-separated fields", lines >= 4 && badlines == 0);
+}
+
 struct group {
   char *name;
   void (*fn)(void);
@@ -698,6 +906,8 @@ struct group {
   {"xargs", testxargs},
   {"trace", testtrace},
   {"sysinfo", testsysinfo},
+  {"getprocs", testgetprocs},
+  {"ps", testps},
   {0, 0},
 };
 

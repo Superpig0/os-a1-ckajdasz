@@ -139,3 +139,15 @@ sys_sysinfo(void)
     return -1;
   return 0;
 }
+
+// getprocs(buf, max): see getprocs() in proc.c.
+uint64
+sys_getprocs(void)
+{
+  uint64 buf;
+  int max;
+
+  argaddr(0, &buf);
+  argint(1, &max);
+  return getprocs(buf, max);
+}

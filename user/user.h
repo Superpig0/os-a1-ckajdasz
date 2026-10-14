@@ -2,6 +2,7 @@
 
 struct stat;
 struct sysinfo;
+struct uproc;
 
 // system calls
 int fork(void);
@@ -28,6 +29,7 @@ int uptime(void);
 int sync(void);
 int trace(int);
 int sysinfo(struct sysinfo *);
+int getprocs(struct uproc *, int);
 
 // ulib.c
 int stat(const char *, struct stat *);

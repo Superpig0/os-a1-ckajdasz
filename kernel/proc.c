@@ -5,6 +5,7 @@
 #include "spinlock.h"
 #include "proc.h"
 #include "defs.h"
+#include "uproc.h"
 
 struct cpu cpus[NCPU];
 
@@ -717,6 +718,51 @@ countproc(void)
     if (p->state != UNUSED)
       n++;
     release(&p->lock);
+  }
+  return n;
+}
+
+// Copy a struct uproc for each process whose state is not UNUSED to
+// the user array buf, walking proc[] in table order and stopping after
+// max entries. Returns the number copied, or -1 if max < 0 or a copy
+// fails. Locks are taken per entry and dropped before copyout(), which
+// may fault in and allocate pages; only one struct uproc sits on the
+// kernel stack.
+int
+getprocs(uint64 buf, int max)
+{
+  struct proc *me = myproc();
+  struct proc *p;
+  struct uproc u;
+  int n, inuse;
+
+  if (max < 0)
+    return -1;
+  n = 0;
+  for (p = proc; p < &proc[NPROC] && n < max; p++) {
+    // wait_lock before p->lock, as in kexit() and kwait(). Holding
+    // wait_lock also keeps p->parent from being reaped while we read
+    // its pid.
+    acquire(&wait_lock);
+    acquire(&p->lock);
+    inuse = p->state != UNUSED;
+    if (inuse) {
+      memset(&u, 0, sizeof(u));
+      u.pid = p->pid;
+      u.ppid = p->parent ? p->parent->pid : 0;
+      u.state = p->state;
+      u.sz = p->sz;
+      safestrcpy(u.name, p->name, sizeof(u.name));
+    }
+    release(&p->lock);
+    release(&wait_lock);
+
+    if (inuse) {
+      if (copyout(me->pagetable, me->sz, buf + n * sizeof(u), (char *)&u,
+                  sizeof(u)) < 0)
+        return -1;
+      n++;
+    }
   }
   return n;
 }

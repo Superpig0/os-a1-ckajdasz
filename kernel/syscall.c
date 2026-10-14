@@ -105,6 +105,7 @@ extern uint64 sys_close(void);
 extern uint64 sys_sync(void);
 extern uint64 sys_trace(void);
 extern uint64 sys_sysinfo(void);
+extern uint64 sys_getprocs(void);
 
 // An array mapping syscall numbers from syscall.h
 // to the function that handles the system call.
@@ -134,6 +135,7 @@ static uint64 (*syscalls[])(void) = {
   [SYS_sync]    = sys_sync,
   [SYS_trace]   = sys_trace,
   [SYS_sysinfo] = sys_sysinfo,
+  [SYS_getprocs] = sys_getprocs,
   // clang-format on
 };
 
@@ -164,6 +166,7 @@ static char *syscallnames[] = {
   [SYS_sync]    = "sync",
   [SYS_trace]   = "trace",
   [SYS_sysinfo] = "sysinfo",
+  [SYS_getprocs] = "getprocs",
   // clang-format on
 };
 
