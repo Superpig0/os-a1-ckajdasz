@@ -16,6 +16,7 @@
 #include "kernel/fcntl.h"
 #include "kernel/fs.h"
 #include "kernel/param.h"
+#include "kernel/sysinfo.h"
 #include "user/user.h"
 
 #define ARGV(...) ((char *[]){__VA_ARGS__, 0})
@@ -610,6 +611,84 @@ tracehelp(char **argv)
   exit(0);
 }
 
+#define PG 4096
+
+void
+testsysinfo(void)
+{
+  struct sysinfo a, b;
+  int fds[2], fd, fd2, pid, i;
+  char *mem, c;
+
+  ok("sysinfo returns 0", sysinfo(&a) == 0);
+  ok("sysinfo: freemem is a nonzero page multiple",
+     a.freemem > 0 && a.freemem % PG == 0);
+  ok("sysinfo: nproc counts init, sh and a1test", a.nproc >= 3);
+  ok("sysinfo: console counts as an open file", a.nopenfile >= 1);
+
+  // freemem: touch every page in case sbrk allocates lazily.
+  sysinfo(&a);
+  mem = sbrk(10 * PG);
+  for (i = 0; i < 10; i++)
+    mem[i * PG] = 1;
+  sysinfo(&b);
+  ok("sysinfo: freemem drops >= 10 pages after sbrk",
+     a.freemem >= b.freemem && a.freemem - b.freemem >= 10 * PG);
+  sbrk(-10 * PG);
+  sysinfo(&b);
+  // A page-table page may stay allocated, so allow a little slack.
+  ok("sysinfo: freemem recovers after sbrk(-)", b.freemem + 2 * PG >= a.freemem);
+
+  // nproc: +1 while a child is alive, back after wait.
+  pipe(fds);
+  sysinfo(&a);
+  pid = fork();
+  if (pid == 0) {
+    close(fds[1]);
+    read(fds[0], &c, 1);
+    exit(0);
+  }
+  sysinfo(&b);
+  ok("sysinfo: nproc +1 after fork", b.nproc == a.nproc + 1);
+  close(fds[0]);
+  close(fds[1]);
+  wait(0);
+  sysinfo(&b);
+  ok("sysinfo: nproc back after wait", b.nproc == a.nproc);
+
+  // nopenfile: open, dup, pipe and close.
+  sysinfo(&a);
+  fd = open("/README", O_RDONLY);
+  sysinfo(&b);
+  ok("sysinfo: open +1", b.nopenfile == a.nopenfile + 1);
+  fd2 = dup(fd);
+  sysinfo(&b);
+  ok("sysinfo: dup shares the entry (+0)", b.nopenfile == a.nopenfile + 1);
+  close(fd2);
+  close(fd);
+  sysinfo(&b);
+  ok("sysinfo: close -1", b.nopenfile == a.nopenfile);
+  pipe(fds);
+  sysinfo(&b);
+  ok("sysinfo: pipe +2", b.nopenfile == a.nopenfile + 2);
+  close(fds[0]);
+  sysinfo(&b);
+  ok("sysinfo: close read end -1", b.nopenfile == a.nopenfile + 1);
+  close(fds[1]);
+  sysinfo(&b);
+  ok("sysinfo: close write end -1", b.nopenfile == a.nopenfile);
+
+  // Invalid addresses fail and change nothing.
+  sysinfo(&a);
+  ok("sysinfo(0) (read-only text) -> -1", sysinfo(0) == -1);
+  ok("sysinfo(past sbrk(0)) -> -1",
+     sysinfo((struct sysinfo *)(sbrk(0) + 10 * PG)) == -1);
+  ok("sysinfo(above MAXVA) -> -1", sysinfo((struct sysinfo *)BADPTR) == -1);
+  sysinfo(&b);
+  ok("sysinfo: counts unchanged after bad calls",
+     b.nproc == a.nproc && b.nopenfile == a.nopenfile);
+}
+
 struct group {
   char *name;
   void (*fn)(void);
@@ -618,6 +697,7 @@ struct group {
   {"find", testfind},
   {"xargs", testxargs},
   {"trace", testtrace},
+  {"sysinfo", testsysinfo},
   {0, 0},
 };
 

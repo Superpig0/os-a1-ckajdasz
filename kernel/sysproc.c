@@ -6,6 +6,7 @@
 #include "spinlock.h"
 #include "proc.h"
 #include "vm.h"
+#include "sysinfo.h"
 
 uint64
 sys_exit(void)
@@ -119,5 +120,22 @@ sys_trace(void)
 
   argint(0, &mask);
   myproc()->tracemask = mask;
+  return 0;
+}
+
+// Copy a struct sysinfo to the user address in a0.
+uint64
+sys_sysinfo(void)
+{
+  struct proc *p = myproc();
+  struct sysinfo info;
+  uint64 addr;
+
+  argaddr(0, &addr);
+  info.freemem = countfreemem();
+  info.nproc = countproc();
+  info.nopenfile = countopenfile();
+  if (copyout(p->pagetable, p->sz, addr, (char *)&info, sizeof(info)) < 0)
+    return -1;
   return 0;
 }
