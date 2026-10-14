@@ -227,10 +227,37 @@ mkfile(char *path)
     fprintf(2, "a1test: cannot create %s\n", path);
 }
 
+#define SLEEPUSAGE "usage: sleep <ticks>\n"
+
+void
+testsleep(void)
+{
+  int t0, status;
+
+  check("sleep 0", ARGV("sleep", "0"), "", "", "", 0, 0);
+  check("sleep 3", ARGV("sleep", "3"), "", "", "", 0, 0);
+  check("sleep 007", ARGV("sleep", "007"), "", "", "", 0, 0);
+
+  t0 = uptime();
+  status = run(ARGV("sleep", "10"), "");
+  ok("sleep 10 waits at least 10 ticks", status == 0 && uptime() - t0 >= 10);
+
+  check("sleep: no argument", ARGV("sleep"), "", "", SLEEPUSAGE, 1, 0);
+  check("sleep: two arguments", ARGV("sleep", "1", "2"), "", "", SLEEPUSAGE, 1, 0);
+  check("sleep: negative", ARGV("sleep", "-1"), "", "", SLEEPUSAGE, 1, 0);
+  check("sleep: plus sign", ARGV("sleep", "+5"), "", "", SLEEPUSAGE, 1, 0);
+  check("sleep: letters", ARGV("sleep", "abc"), "", "", SLEEPUSAGE, 1, 0);
+  check("sleep: digits then letter", ARGV("sleep", "5x"), "", "", SLEEPUSAGE, 1, 0);
+  check("sleep: letter then digits", ARGV("sleep", "x5"), "", "", SLEEPUSAGE, 1, 0);
+  check("sleep: empty string", ARGV("sleep", ""), "", "", SLEEPUSAGE, 1, 0);
+  check("sleep: space inside", ARGV("sleep", "1 2"), "", "", SLEEPUSAGE, 1, 0);
+}
+
 struct group {
   char *name;
   void (*fn)(void);
 } groups[] = {
+  {"sleep", testsleep},
   {0, 0},
 };
 
