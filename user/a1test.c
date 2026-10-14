@@ -15,6 +15,7 @@
 #include "kernel/stat.h"
 #include "kernel/fcntl.h"
 #include "kernel/fs.h"
+#include "kernel/param.h"
 #include "user/user.h"
 
 #define ARGV(...) ((char *[]){__VA_ARGS__, 0})
@@ -453,12 +454,122 @@ testfind(void)
   rmtree("/a1t");
 }
 
+#define XUSAGE "usage: xargs [-n N] cmd [args...]\n"
+#define XECHO(...) ARGV("xargs", __VA_ARGS__, "echo", "x")
+
+// Build "xargs [-n N] a1test argc z z ..." with nfixed arguments after
+// "xargs [-n N]", i.e. a1test, argc and nfixed-2 copies of z.
+char **
+xargsfixed(char *n, int nfixed)
+{
+  static char *av[MAXARG + 1];
+  int i, k;
+
+  k = 0;
+  av[k++] = "xargs";
+  if (n) {
+    av[k++] = "-n";
+    av[k++] = n;
+  }
+  av[k++] = "a1test";
+  av[k++] = "argc";
+  for (i = 2; i < nfixed; i++)
+    av[k++] = "z";
+  av[k] = 0;
+  return av;
+}
+
+void
+testxargs(void)
+{
+  int i;
+
+  // The spec's examples.
+  check("xargs: spec echo x", ARGV("xargs", "echo", "x"), "a b\n",
+        "x a b\n", "", 0, 0);
+  check("xargs: spec -n 2", XECHO("-n", "2"), "a b c d e\n",
+        "x a b\nx c d\nx e\n", "", 0, 0);
+
+  // Without -n: one run per non-empty line.
+  check("xargs: one run per line", ARGV("xargs", "echo", "x"),
+        "a b\nc\nd e f\n", "x a b\nx c\nx d e f\n", "", 0, 0);
+  check("xargs: blank lines skipped", ARGV("xargs", "echo", "x"),
+        "a\n\n   \n\t\nb\n", "x a\nx b\n", "", 0, 0);
+  check("xargs: spaces and tabs", ARGV("xargs", "echo", "x"),
+        "  a\t\tb  \n", "x a b\n", "", 0, 0);
+  check("xargs: no trailing newline", ARGV("xargs", "echo", "x"), "a b",
+        "x a b\n", "", 0, 0);
+  check("xargs: empty input", ARGV("xargs", "echo", "x"), "", "", "", 0, 0);
+  check("xargs: only whitespace", ARGV("xargs", "echo", "x"), " \n\t\n\n",
+        "", "", 0, 0);
+  check("xargs: no fixed args", ARGV("xargs", "echo"), "hi there\n",
+        "hi there\n", "", 0, 0);
+
+  // With -n: line boundaries are ignored.
+  check("xargs: -n across lines", XECHO("-n", "2"), "a\nb c\nd\n",
+        "x a b\nx c d\n", "", 0, 0);
+  check("xargs: -n 1", XECHO("-n", "1"), "a b\nc\n", "x a\nx b\nx c\n",
+        "", 0, 0);
+  check("xargs: -n 3 leftover", XECHO("-n", "3"), "a b c d\n",
+        "x a b c\nx d\n", "", 0, 0);
+  check("xargs: -n bigger than input", XECHO("-n", "10"), "a\nb\n",
+        "x a b\n", "", 0, 0);
+  check("xargs: -n no trailing newline", XECHO("-n", "2"), "a b c",
+        "x a b\nx c\n", "", 0, 0);
+  check("xargs: -n blank lines", XECHO("-n", "2"), "a\n\n\nb\n",
+        "x a b\n", "", 0, 0);
+  check("xargs: -n empty input", XECHO("-n", "2"), "", "", "", 0, 0);
+
+  // Exit status: 0 only if every run exited 0; later runs still happen.
+  check("xargs: all runs succeed", ARGV("xargs", "a1test", "fail"),
+        "a\nb\n", "a\nb\n", "", 0, 0);
+  check("xargs: middle run fails", ARGV("xargs", "a1test", "fail"),
+        "good\nbad\nlater\n", "good\nlater\n", "", 1, 0);
+  check("xargs: last run fails", ARGV("xargs", "a1test", "fail"),
+        "a\nbad\n", "a\n", "", 1, 0);
+  check("xargs: -n run fails", ARGV("xargs", "-n", "2", "a1test", "fail"),
+        "a bad c d\n", "c d\n", "", 1, 0);
+  check("xargs: missing command", ARGV("xargs", "nosuchcmd"), "a\n",
+        "", 0, 1, 0);
+  check("xargs: missing command, no input", ARGV("xargs", "nosuchcmd"), "",
+        "", "", 0, 0);
+
+  // Bad usage.
+  check("xargs: no args", ARGV("xargs"), "a\n", "", XUSAGE, 1, 0);
+  check("xargs: -n 0", XECHO("-n", "0"), "a\n", "", XUSAGE, 1, 0);
+  check("xargs: -n -1", XECHO("-n", "-1"), "a\n", "", XUSAGE, 1, 0);
+  check("xargs: -n x", XECHO("-n", "x"), "a\n", "", XUSAGE, 1, 0);
+  check("xargs: -n 2x", XECHO("-n", "2x"), "a\n", "", XUSAGE, 1, 0);
+  check("xargs: -n empty", XECHO("-n", ""), "a\n", "", XUSAGE, 1, 0);
+  check("xargs: -n without N", ARGV("xargs", "-n"), "a\n", "", XUSAGE, 1, 0);
+  check("xargs: -n without cmd", ARGV("xargs", "-n", "2"), "a\n", "",
+        XUSAGE, 1, 0);
+
+  // MAXARG: exec takes at most 31 arguments, so runs are split to fit.
+  wbuf[0] = '\0';
+  for (i = 0; i < 40; i++)
+    append(wbuf, i < 39 ? "w " : "w\n");
+  check("xargs: 40 words split at 31", ARGV("xargs", "a1test", "argc"), wbuf,
+        "argc=31\nargc=13\n", "", 0, 0);
+  check("xargs: -n 50 capped at 31", ARGV("xargs", "-n", "50", "a1test", "argc"),
+        wbuf, "argc=31\nargc=13\n", "", 0, 0);
+  check("xargs: -n 29 exactly fits", ARGV("xargs", "-n", "29", "a1test", "argc"),
+        wbuf, "argc=31\nargc=13\n", "", 0, 0);
+  check("xargs: -n 10 below cap", ARGV("xargs", "-n", "10", "a1test", "argc"),
+        wbuf, "argc=12\nargc=12\nargc=12\nargc=12\n", "", 0, 0);
+  check("xargs: 30 fixed args", xargsfixed(0, 30), "p q\n",
+        "argc=31\nargc=31\n", "", 0, 0);
+  check("xargs: 28 fixed args, -n 5", xargsfixed("5", 28), "1 2 3 4\n",
+        "argc=31\nargc=29\n", "", 0, 0);
+}
+
 struct group {
   char *name;
   void (*fn)(void);
 } groups[] = {
   {"sleep", testsleep},
   {"find", testfind},
+  {"xargs", testxargs},
   {0, 0},
 };
 
