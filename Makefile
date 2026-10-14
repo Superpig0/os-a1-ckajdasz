@@ -152,6 +152,7 @@ UPROGS=\
 	$U/_sync\
 	$U/_a1test\
 	$U/_sleep\
+	$U/_find\
 
 fs.img: mkfs/mkfs README $(UPROGS)
 	mkfs/mkfs fs.img README $(UPROGS)

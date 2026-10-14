@@ -183,19 +183,24 @@ ok(char *name, int cond)
   }
 }
 
-// Remove path and, if it is a directory, everything under it.
+// The path rmtree1() is removing. Like find, it is one global buffer
+// extended in place, since a per-frame copy overflows the one-page user
+// stack on the deep test tree.
+char rmpath[256];
+
+// Remove rmpath[0..len) and, if it is a directory, everything under it.
 void
-rmtree(char *path)
+rmtree1(int len)
 {
-  char child[256], *p;
   struct dirent *de;
   struct stat st;
+  char *p;
   int fd, n, i;
 
-  if (stat(path, &st) < 0)
+  if (stat(rmpath, &st) < 0)
     return;
-  if (st.type == T_DIR && strlen(path) + 1 + DIRSIZ + 1 <= sizeof child) {
-    if ((fd = open(path, O_RDONLY)) < 0)
+  if (st.type == T_DIR && len + 1 + DIRSIZ + 1 <= sizeof(rmpath)) {
+    if ((fd = open(rmpath, O_RDONLY)) < 0)
       return;
     if ((de = malloc(st.size)) == 0) {
       close(fd);
@@ -203,21 +208,27 @@ rmtree(char *path)
     }
     n = read(fd, de, st.size) / sizeof(*de);
     close(fd);
-    strcpy(child, path);
-    p = child + strlen(child);
-    *p++ = '/';
+    p = rmpath + len + 1;
     for (i = 0; i < n; i++) {
       if (de[i].inum == 0)
         continue;
+      rmpath[len] = '/';
       memmove(p, de[i].name, DIRSIZ);
       p[DIRSIZ] = '\0';
-      if (strcmp(p, ".") == 0 || strcmp(p, "..") == 0)
-        continue;
-      rmtree(child);
+      if (strcmp(p, ".") != 0 && strcmp(p, "..") != 0)
+        rmtree1(len + 1 + strlen(p));
     }
+    rmpath[len] = '\0';
     free(de);
   }
-  unlink(path);
+  unlink(rmpath);
+}
+
+void
+rmtree(char *path)
+{
+  strcpy(rmpath, path);
+  rmtree1(strlen(path));
 }
 
 void
@@ -253,11 +264,201 @@ testsleep(void)
   check("sleep: space inside", ARGV("sleep", "1 2"), "", "", SLEEPUSAGE, 1, 0);
 }
 
+#define FINDUSAGE "usage: find <dir> <pattern> [-type f|d]\n"
+#define DEEP 15
+#define WIDE 20
+
+char wbuf[OUTMAX];
+
+void
+append(char *dst, char *s)
+{
+  strcpy(dst + strlen(dst), s);
+}
+
+// wide/sNN for i in 0..WIDE-1
+void
+widename(char *dst, int i)
+{
+  strcpy(dst, "wide/s00");
+  dst[6] = '0' + i / 10;
+  dst[7] = '0' + i % 10;
+}
+
+// The tree the find tests search, under /a1t:
+//   a/y.c  a/b/x.c                        the spec's example
+//   p/{ab,axxbyy,ba,abc.c,x.c,readme,c}   pattern targets
+//   p/dd/ab                               a match one level down
+//   deep/d/d/.../d/leaf                   DEEP nested directories
+//   wide/s00/f ... wide/s19/f             WIDE sibling directories
+//   long/abcdefghijklmn                   a DIRSIZ-long name
+void
+mkfindtree(void)
+{
+  char p[128];
+  int i;
+
+  rmtree("/a1t");
+  mkdir("/a1t");
+  chdir("/a1t");
+
+  mkdir("a");
+  mkdir("a/b");
+  mkfile("a/b/x.c");
+  mkfile("a/y.c");
+
+  mkdir("p");
+  mkfile("p/ab");
+  mkfile("p/axxbyy");
+  mkfile("p/ba");
+  mkfile("p/abc.c");
+  mkfile("p/x.c");
+  mkfile("p/readme");
+  mkfile("p/c");
+  mkdir("p/dd");
+  mkfile("p/dd/ab");
+
+  strcpy(p, "deep");
+  mkdir(p);
+  for (i = 0; i < DEEP; i++) {
+    append(p, "/d");
+    mkdir(p);
+  }
+  append(p, "/leaf");
+  mkfile(p);
+
+  mkdir("wide");
+  for (i = 0; i < WIDE; i++) {
+    widename(p, i);
+    mkdir(p);
+    append(p, "/f");
+    mkfile(p);
+  }
+
+  mkdir("long");
+  mkfile("long/abcdefghijklmn");
+}
+
+#define FIND(...) ARGV("/find", __VA_ARGS__)
+#define PALL "p/ab\np/abc.c\np/axxbyy\np/ba\np/c\np/dd\np/dd/ab\np/readme\np/x.c\n"
+#define PFILES "p/ab\np/abc.c\np/axxbyy\np/ba\np/c\np/dd/ab\np/readme\np/x.c\n"
+
+void
+testfind(void)
+{
+  char p[128];
+  int i;
+
+  mkfindtree();
+
+  // The spec's examples.
+  check("find: spec a *.c", FIND("a", "*.c"), "", "a/y.c\na/b/x.c\n", "", 0, 1);
+  check("find: spec a b -type d", FIND("a", "b", "-type", "d"), "",
+        "a/b\n", "", 0, 1);
+
+  // '*' at the end, start and middle, and combinations.
+  check("find: * at end ab*", FIND("p", "ab*"), "",
+        "p/ab\np/abc.c\np/dd/ab\n", "", 0, 1);
+  check("find: * at start *.c", FIND("p", "*.c"), "", "p/abc.c\np/x.c\n", "", 0, 1);
+  check("find: * in middle a*y", FIND("p", "a*y"), "", "p/axxbyy\n", "", 0, 1);
+  check("find: a*b*", FIND("p", "a*b*"), "",
+        "p/ab\np/abc.c\np/axxbyy\np/dd/ab\n", "", 0, 1);
+  check("find: *b", FIND("p", "*b"), "", "p/ab\np/dd/ab\n", "", 0, 1);
+  check("find: *x*", FIND("p", "*x*"), "", "p/axxbyy\np/x.c\n", "", 0, 1);
+  check("find: * alone", FIND("p", "*"), "", PALL, "", 0, 1);
+  check("find: **", FIND("p", "**"), "", PALL, "", 0, 1);
+  check("find: a**b", FIND("p", "a**b"), "", "p/ab\np/dd/ab\n", "", 0, 1);
+
+  // Exact names: no '*', so substrings and prefixes don't count.
+  check("find: exact c", FIND("p", "c"), "", "p/c\n", "", 0, 1);
+  check("find: exact ab", FIND("p", "ab"), "", "p/ab\np/dd/ab\n", "", 0, 1);
+  check("find: prefix only abc", FIND("p", "abc"), "", "", "", 0, 1);
+  check("find: no match", FIND("p", "zzz"), "", "", "", 0, 1);
+
+  // -type
+  check("find: -type f *", FIND("p", "*", "-type", "f"), "", PFILES, "", 0, 1);
+  check("find: -type d *", FIND("p", "*", "-type", "d"), "", "p/dd\n", "", 0, 1);
+  check("find: -type f dd", FIND("p", "dd", "-type", "f"), "", "", "", 0, 1);
+  check("find: -type d dd", FIND("p", "dd", "-type", "d"), "", "p/dd\n", "", 0, 1);
+  check("find: -type f device", FIND("/", "console", "-type", "f"), "",
+        "/console\n", "", 0, 1);
+  check("find: -type d device", FIND("/", "console", "-type", "d"), "",
+        "", "", 0, 1);
+
+  // Never print . or .. or <dir> itself.
+  check("find: . not printed", FIND("p", "."), "", "", "", 0, 1);
+  check("find: .. not printed", FIND("p", ".."), "", "", "", 0, 1);
+  check("find: .* not printed", FIND("p", ".*"), "", "", "", 0, 1);
+  check("find: dir itself not printed", FIND("p/dd", "dd"), "", "", "", 0, 1);
+
+  // How <dir> is written is kept as given.
+  check("find: dir .", FIND(".", "x.c"), "", "./a/b/x.c\n./p/x.c\n", "", 0, 1);
+  check("find: trailing slash", FIND("p/", "c"), "", "p/c\n", "", 0, 1);
+  check("find: absolute dir", FIND("/a1t/a", "*.c"), "",
+        "/a1t/a/b/x.c\n/a1t/a/y.c\n", "", 0, 1);
+  check("find: dir is a file", FIND("p/c", "c"), "", "", "", 0, 1);
+
+  // Deep trees: DEEP levels of directories, more than NOFILE.
+  wbuf[0] = '\0';
+  strcpy(p, "deep");
+  for (i = 0; i < DEEP; i++) {
+    append(p, "/d");
+    append(wbuf, p);
+    append(wbuf, "\n");
+  }
+  check("find: deep -type d", FIND("deep", "d", "-type", "d"), "", wbuf, "", 0, 1);
+  append(p, "/leaf\n");
+  check("find: deep leaf", FIND("deep", "leaf"), "", p, "", 0, 1);
+
+  // Many siblings, more than NOFILE: catches a leaked fd per directory.
+  wbuf[0] = '\0';
+  for (i = 0; i < WIDE; i++) {
+    widename(p, i);
+    append(wbuf, p);
+    append(wbuf, "/f\n");
+  }
+  check("find: wide files", FIND("wide", "f"), "", wbuf, "", 0, 1);
+  wbuf[0] = '\0';
+  for (i = 0; i < WIDE; i++) {
+    widename(p, i);
+    append(wbuf, p);
+    append(wbuf, "\n");
+  }
+  check("find: wide -type d s*", FIND("wide", "s*", "-type", "d"), "",
+        wbuf, "", 0, 1);
+
+  // A name of exactly DIRSIZ characters.
+  check("find: 14-char name", FIND("long", "abcdefghijklmn"), "",
+        "long/abcdefghijklmn\n", "", 0, 1);
+  check("find: 14-char name *mn", FIND("long", "*mn"), "",
+        "long/abcdefghijklmn\n", "", 0, 1);
+  check("find: 13-char prefix", FIND("long", "abcdefghijklm"), "", "", "", 0, 1);
+
+  // Errors.
+  check("find: missing dir", FIND("nosuch", "x"), "", "",
+        "find: cannot open nosuch\n", 1, 0);
+  check("find: empty dir", FIND("", "x"), "", "", "find: cannot open \n", 1, 0);
+  check("find: no args", ARGV("/find"), "", "", FINDUSAGE, 1, 0);
+  check("find: one arg", FIND("p"), "", "", FINDUSAGE, 1, 0);
+  check("find: -type without value", FIND("p", "c", "-type"), "", "",
+        FINDUSAGE, 1, 0);
+  check("find: -type x", FIND("p", "c", "-type", "x"), "", "", FINDUSAGE, 1, 0);
+  check("find: -type ff", FIND("p", "c", "-type", "ff"), "", "", FINDUSAGE, 1, 0);
+  check("find: misspelled -type", FIND("p", "c", "-typ", "f"), "", "",
+        FINDUSAGE, 1, 0);
+  check("find: extra arg", FIND("p", "c", "-type", "f", "x"), "", "",
+        FINDUSAGE, 1, 0);
+
+  chdir("/");
+  rmtree("/a1t");
+}
+
 struct group {
   char *name;
   void (*fn)(void);
 } groups[] = {
   {"sleep", testsleep},
+  {"find", testfind},
   {0, 0},
 };
 

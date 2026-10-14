@@ -16,11 +16,13 @@ if target == "usertests":
     cmd = "usertests -q"
     done = r"^(ALL TESTS PASSED|SOME TESTS FAILED)"
     good = r"^ALL TESTS PASSED"
+    crash = r"^panic"  # usertests faults on purpose, so only a panic counts
     timeout = 900
 else:
     cmd = ("a1test " + target).strip()
     done = r"^A1TEST: "
     good = r"^A1TEST: ALL PASSED"
+    crash = r"^panic|usertrap\(\): unexpected"
     timeout = 300
 
 # A fresh fs.img each run, so earlier runs leave nothing behind.
@@ -55,7 +57,7 @@ def wait_for(regex, deadline):
         text = output()
         if re.search(regex, text, re.M):
             return text
-        if re.search(r"^panic", text, re.M):
+        if re.search(crash, text, re.M):
             return None
         time.sleep(0.5)
     return None
