@@ -563,6 +563,53 @@ testxargs(void)
         "argc=31\nargc=29\n", "", 0, 0);
 }
 
+#define TRACEUSAGE "usage: trace <mask> <cmd> [args...]\n"
+#define BADPTR ((char *)0xffffffffffUL) // above MAXVA
+
+// The trace program's own checks. The kernel's trace lines go to the
+// console, not to fds, so they are checked by test-a1.py trace instead.
+void
+testtrace(void)
+{
+  ok("trace(0) returns 0", trace(0) == 0);
+  check("trace: mask 0 runs cmd", ARGV("trace", "0", "echo", "hi"), "",
+        "hi\n", "", 0, 0);
+  check("trace: args passed through", ARGV("trace", "0", "a1test", "argc", "x"),
+        "", "argc=3\n", "", 0, 0);
+  check("trace: missing cmd", ARGV("trace", "0", "nosuchcmd"), "", "",
+        "trace: exec nosuchcmd failed\n", 1, 0);
+  check("trace: no args", ARGV("trace"), "", "", TRACEUSAGE, 1, 0);
+  check("trace: mask only", ARGV("trace", "1"), "", "", TRACEUSAGE, 1, 0);
+  check("trace: mask letters", ARGV("trace", "x", "echo"), "", "",
+        TRACEUSAGE, 1, 0);
+  check("trace: mask negative", ARGV("trace", "-1", "echo"), "", "",
+        TRACEUSAGE, 1, 0);
+  check("trace: mask empty", ARGV("trace", "", "echo"), "", "", TRACEUSAGE, 1, 0);
+}
+
+// "a1test tracehelp": a fixed series of syscalls for test-a1.py trace
+// to check, covering every argument style trace prints.
+void
+tracehelp(char **argv)
+{
+  char buf[1];
+  int fd;
+
+  getpid();
+  if (fork() == 0) {
+    getpid();
+    exit(0);
+  }
+  wait(0);
+  open(BADPTR, O_RDONLY);
+  exec(BADPTR, argv);
+  close(-1);
+  read(99, buf, 1);
+  fd = open("README", O_RDONLY);
+  close(fd);
+  exit(0);
+}
+
 struct group {
   char *name;
   void (*fn)(void);
@@ -570,6 +617,7 @@ struct group {
   {"sleep", testsleep},
   {"find", testfind},
   {"xargs", testxargs},
+  {"trace", testtrace},
   {0, 0},
 };
 
@@ -592,6 +640,9 @@ main(int argc, char *argv[])
       printf("%s%s", argv[i], i + 1 < argc ? " " : "\n");
     exit(0);
   }
+
+  if (argc >= 2 && strcmp(argv[1], "tracehelp") == 0)
+    tracehelp(argv);
 
   chdir("/");
   rmtree(TMPDIR);

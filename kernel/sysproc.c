@@ -110,3 +110,14 @@ sys_uptime(void)
   release(&tickslock);
   return xticks;
 }
+
+// Trace every later syscall i of this process with bit i of mask set.
+uint64
+sys_trace(void)
+{
+  int mask;
+
+  argint(0, &mask);
+  myproc()->tracemask = mask;
+  return 0;
+}
